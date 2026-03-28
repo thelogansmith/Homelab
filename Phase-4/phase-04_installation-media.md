@@ -37,11 +37,11 @@
 ### QCOW2 / OVA — Download to Proxmox Host
 These formats are not uploaded to ISO storage. They are downloaded directly to the Proxmox host (e.g. `/var/lib/vz/images/` or a staging directory) and imported during Phase 5 VM creation.
  
-- [ ] **REMnux QCOW2**
+- [x] **REMnux QCOW2**
   - Skills: QCOW2 format awareness, SCP/wget file transfer to Proxmox host, understanding pre-built VM disk images vs installer ISOs
   - Source: https://docs.remnux.org/install-distro/get-virtual-appliance
   - Staging: Download to Proxmox host — import as VM disk in Phase 5 via `qm importdisk`
-- [ ] **Wazuh OVA**
+- [x] **Wazuh OVA**
   - Skills: OVA format (VMware-origin appliance), `qm importovf` workflow, VMDK → QCOW2 conversion awareness (`qemu-img convert`), network adapter compatibility (VMXNET3 → VirtIO)
   - Source: https://documentation.wazuh.com/current/deployment-options/virtual-machine/virtual-machine.html
   - Staging: Download to Proxmox host — import in Phase 5
@@ -49,16 +49,6 @@ These formats are not uploaded to ISO storage. They are downloaded directly to t
  
 ---
 ## Notes
-Installation Locations:
-Ubuntu Server: https://ubuntu.com/download/server
-Kali Linux: https://www.kali.org/get-kali/#kali-installer-images
-Security Onion: https://github.com/Security-Onion-Solutions/securityonion/blob/2.4/main/DOWNLOAD_AND_VERIFY_ISO.md
-Windows 10: https://www.microsoft.com/en-us/software-download/windows10Tried 
-	- User Agent trick (Linux/Firefox) got a download error, used media creation tool.
-Windows Server: https://www.microsoft.com/en-us/evalcenter/download-windows-server-2022
-VirtIO Drivers: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.285-1/
-OPNsense: https://opnsense.org/download/
-
 
 SHA256 verification check cmd via powershell: Get-FileHash (File location) -Algorithm SHA256
 *SHA512 is required to verify the Wazuh download
