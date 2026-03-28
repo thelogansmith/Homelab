@@ -383,7 +383,7 @@ Techniques observed in lab exercises. Grows as simulations are completed.
 ## Learning Roadmap
 
 ```
-Phase 1 — Foundations (Current)
+Foundations (Current)
 ├── ✅ Deploy Proxmox on dedicated hardware (24-core Xeon, 128GB RAM)
 ├── ✅ Configure 3-node Proxmox cluster
 ├── 🔄 Recover MikroTik RB4011 via NetInstall (RouterOS 6.49.18)
@@ -395,21 +395,21 @@ Phase 1 — Foundations (Current)
 ├── 🔲 Configure Technitium DNS (lab.local)
 └── 🔲 Complete TryHackMe SOC Level 1 path
 
-Phase 2 — Detection & Analysis
+Detection & Analysis
 ├── Build Splunk dashboards for auth, network, and endpoint events
 ├── Write custom Wazuh detection rules
 ├── Simulate Kerberoasting → detect in Splunk (Event ID 4769)
 ├── Simulate full attack chain → write formal incident report
 └── Deploy WireGuard on OPNsense for remote access (iOS/tvOS)
 
-Phase 3 — Intermediate Skills
+Intermediate Skills
 ├── Write Suricata rules based on observed attack traffic
 ├── Practice threat hunting with MITRE ATT&CK Navigator
 ├── Set up TheHive for incident case management
 ├── Learn Python for log parsing and Splunk API automation
 └── Pursue CompTIA Security+ or BTL1 certification
 
-Phase 4 — Advanced Topics
+Advanced Topics
 ├── Memory forensics with Volatility (REMnux)
 ├── Basic static malware analysis
 ├── Publish Sigma detection rules to public repository
