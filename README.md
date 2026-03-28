@@ -41,7 +41,7 @@ All VMs run on Proxmox VE across a three-node dedicated bare-metal cluster, prov
 | **MikroTik cAP ax** | WiFi 6 AP | Wireless access for Personal (VLAN 40) and Untrusted (VLAN 99) |
 | **TP-Link TL-SG1016DE** | 16-port managed switch | 802.1Q VLAN switching, port mirroring → Security Onion |
 | **Raspberry Pi 3B** | 1GB RAM | Pi-hole DNS for Untrusted VLAN 99 (physical device) |
-| **Gaming PC** | 12th gen i5, 64GB RAM, 15TB+ storage, RTX 3060Ti | Ad-hoc tasks via VMware |
+| **Windows 11 PC** | 12th gen i5, 64GB RAM, 15TB+ storage, RTX 3060Ti | Ad-hoc tasks via VMware |
 
 **Proxmox VE:** v8.4 · Kernel 6.8.12-pve · Boot Mode: EFI
 
