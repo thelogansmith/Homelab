@@ -2,7 +2,8 @@
 
 > A hands-on security operations lab built on dedicated bare-metal hardware running Proxmox VE. The network architecture follows the **NCyTE VCCC three-tier model** (Management / Internal / DMZ), simulating a real enterprise environment for practicing SOC analyst skills — log analysis, threat detection, network monitoring, vulnerability management, and incident response.
 >
-> **Status:** 🔨 Actively building — documenting progress as I learn.
+> **Goal:** Demonstrate SOC Level 1 analyst readiness through real infrastructure builds, not just theory.  
+> **Status:** 🔨 Actively building — MikroTik recovery in progress; core Proxmox cluster operational.
 
 ---
 
@@ -11,142 +12,199 @@
 - [Hardware Infrastructure](#hardware-infrastructure)
 - [Network Architecture](#network-architecture)
 - [Virtual Machines](#virtual-machines)
-- [Skills in Progress](#skills-in-progress)
+- [Services & Software Stack](#services--software-stack)
+- [Build Progress](#build-progress)
 - [Projects & Labs](#projects--labs)
   - [SIEM with Splunk & Wazuh](#1-siem-with-splunk--wazuh)
   - [Network Traffic Analysis](#2-network-traffic-analysis)
   - [Vulnerability Scanning](#3-vulnerability-scanning)
   - [Active Directory Lab](#4-active-directory-lab)
   - [Kali Linux Attack Simulations](#5-kali-linux-attack-simulations)
-- [CTF & Platform Writeups](#ctf--platform-writeups)
-- [Tools & Technologies](#tools--technologies)
+- [Key Outcomes](#key-outcomes)
+- [MITRE ATT&CK Coverage](#mitre-attck-coverage)
 - [Learning Roadmap](#learning-roadmap)
 - [Certifications & Learning Path](#certifications--learning-path)
-- [MITRE ATT&CK Coverage](#mitre-attck-coverage)
+- [Known Issues & Notes](#known-issues--notes)
 
 ---
 
 ## Hardware Infrastructure
 
-All VMs run on Proxmox VE across dedicated bare-metal hardware, providing enterprise-grade resource headroom and snapshot-based rollback for safe lab exercises.
+All VMs run on Proxmox VE across a three-node dedicated bare-metal cluster, providing enterprise-grade resource headroom and snapshot-based rollback for safe lab exercises.
 
-| Device | CPU | RAM | Storage | Role |
-|---|---|---|---|---|
-| **Primary Server** | 2× Intel Xeon E5-2620 v3 @ 2.40GHz (24 cores) | 125.81 GB | 1.23 TB | Primary Proxmox VE host — SIEM, monitoring, core services |
-| **HP EliteDesk NUC #1** | [CPU] | [RAM] | [Storage] | Proxmox node — Internal tier VMs |
-| **HP EliteDesk NUC #2** | [CPU] | [RAM] | [Storage] | Proxmox node — Attack & DMZ VMs |
-| **HP EliteDesk NUC #3** | [CPU] | [RAM] | [Storage] | Proxmox node — spare / future expansion |
-| **MikroTik Router** | — | — | — | Core routing, VLAN trunking, inter-tier firewall rules |
-| **Dedicated Switch** | — | — | — | 802.1Q VLAN segmentation, port mirroring for PCAP |
+| Device | Specs | Role |
+| --- | --- | --- |
+| **Primary Server (pve-srv1)** | 2× Xeon E5-2620 v3 @ 2.40GHz (24 cores), 128GB DDR3 ECC, 2TB NVMe cluster, 4×2TB HDD + 4TB HDD, GTX 1050Ti | Primary Proxmox node — SIEM, monitoring, OPNsense, core services |
+| **HP EliteDesk NUC #1 (pve-nuc1)** | i5-6500T, 16GB RAM, 500GB NVMe | Internal tier VMs — AD DC, Windows 10, Ubuntu Server |
+| **HP EliteDesk NUC #2 (pve-nuc2)** | i5-6500T, 16GB RAM, 128GB NVMe | Attack/DMZ VMs — Kali Linux, REMnux |
+| **MikroTik RB4011iGS+** | 10-port router, SFP+ | Edge router — WAN, VLAN 99 DHCP owner, inter-zone firewall |
+| **MikroTik cAP ax** | WiFi 6 AP | Wireless access for Personal (VLAN 40) and Untrusted (VLAN 99) |
+| **TP-Link TL-SG1016DE** | 16-port managed switch | 802.1Q VLAN switching, port mirroring → Security Onion |
+| **Raspberry Pi 3B** | 1GB RAM | Pi-hole DNS for Untrusted VLAN 99 (physical device) |
+| **Gaming PC** | 12th gen i5, 64GB RAM, 15TB+ storage, RTX 3060Ti | Ad-hoc tasks via VMware |
 
-**Proxmox VE:** v8.4.14 · Kernel 6.8.12-15-pve · Boot Mode: EFI · Uptime: 18+ days
+**Proxmox VE:** v8.4 · Kernel 6.8.12-pve · Boot Mode: EFI
 
 ---
 
 ## Network Architecture
 
-The lab implements the **NCyTE Virtual Cybersecurity Career Challenge (VCCC) three-tier network model**, segmented into Management, Internal, and DMZ tiers. A fourth isolated VLAN handles untrusted devices (IoT, personal devices). All inter-tier traffic is controlled by MikroTik firewall rules. The managed switch mirrors traffic from all VLANs to the monitoring host for passive packet capture.
+### Two-Router Design
+
+The lab uses a **split-router architecture** to cleanly separate edge/untrusted traffic from the trusted internal network:
+
+- **MikroTik RB4011** owns the WAN connection and VLAN 99 (Untrusted/IoT). It acts as the hardware edge firewall and trunks all other VLANs downstream to OPNsense. IoT and smart home devices never leave the hardware layer.
+- **OPNsense VM** (pve-srv1) is the internal firewall/router for all trusted VLANs (10, 20, 40, 50). It owns DHCP, inter-VLAN routing, WireGuard VPN termination, and DNS forwarding to Technitium.
+
+This design enforces zero-trust segmentation at the hardware boundary before traffic ever reaches the hypervisor.
 
 ```
-                         ┌──────────────────────┐
-                         │    MikroTik Router   │
-                         │  (VLAN Trunk + FW)   │
-                         └──────────┬───────────┘
-                                    │
-                         ┌──────────┴───────────┐
-                         │    Managed Switch    │
-                         │  (802.1Q + Mirror)   │
-                         └──┬───────┬───────┬───┘
-                            │       │       │
-           ┌────────────────┘       │       └──────────────────┐
-           │                        │                          │
-┌──────────▼─────────┐  ┌───────────▼──────────┐  ┌───────────▼──────────┐
-│   TIER 1           │  │   TIER 2             │  │   TIER 3             │
-│   MANAGEMENT       │  │   INTERNAL           │  │   DMZ                │
-│   VLAN 10          │  │   VLAN 20            │  │   VLAN 30            │
-│   10.10.10.0/24    │  │   192.168.20.0/24    │  │   172.16.30.0/24     │
-│                    │  │                      │  │                      │
-│   Splunk SIEM      │  │   Windows 10 Client  │  │   Kali Linux         │
-│   Wazuh            │  │   Windows Server     │  │   (Attack Sim)       │
-│   Security Onion   │  │   Ubuntu Server      │  │                      │
-│   Pi-hole          │  │   (Corp environment) │  │   Internet-facing    │
-│                    │  │                      │  │   services (future)  │
-└────────────────────┘  └──────────────────────┘  └──────────────────────┘
-                                                            │
-                                              ┌─────────────▼────────────┐
-                                              │   VLAN 99 — UNTRUSTED    │
-                                              │   192.168.99.0/24        │
-                                              │                          │
-                                              │   IoT devices, smart TVs │
-                                              │   Personal devices       │
-                                              │   Internet only — no     │
-                                              │   access to other tiers  │
-                                              └──────────────────────────┘
+                    ┌─────────────────────────┐
+                    │   ISP / WAN             │
+                    └────────────┬────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │   MikroTik RB4011iGS+   │
+                    │   Edge Router           │
+                    │   VLAN 99 DHCP owner    │
+                    └──────────┬──────────────┘
+                               │ VLAN trunk (10,20,40,50)
+                    ┌──────────▼──────────────┐
+                    │   TP-Link TL-SG1016DE   │
+                    │   Managed Switch        │
+                    │   802.1Q + Port Mirror  │
+                    └──┬──────────┬───────┬───┘
+                       │          │       │
+          ┌────────────┘          │       └─────────────────┐
+          │                       │                         │
+┌─────────▼──────────┐ ┌──────────▼──────────┐ ┌───────────▼──────────┐
+│  MANAGEMENT        │ │  INTERNAL LAB        │ │  DMZ                 │
+│  VLAN 10           │ │  VLAN 20             │ │  VLAN 50             │
+│  10.10.10.0/24     │ │  192.168.20.0/24     │ │  172.16.50.0/24      │
+│                    │ │                      │ │                      │
+│  Splunk SIEM       │ │  Windows Server 2022 │ │  Jellyfin            │
+│  Wazuh             │ │  Windows 10 Pro      │ │  Nextcloud           │
+│  Security Onion    │ │  Ubuntu Server       │ │  WireGuard endpoint  │
+│  Technitium DNS    │ │  (Corp environment)  │ │  Kali Linux          │
+│  OPNsense VM       │ │                      │ │  REMnux              │
+└────────────────────┘ └──────────────────────┘ └──────────────────────┘
+          │
+┌─────────▼──────────┐  ┌────────────────────────────────────────────┐
+│  PERSONAL          │  │  UNTRUSTED — VLAN 99 — 192.168.99.0/24     │
+│  VLAN 40           │  │  Managed directly by MikroTik              │
+│  10.40.40.0/24     │  │  IoT, smart home devices                   │
+│                    │  │  Internet only — no access to any tier     │
+│  iOS devices       │  └────────────────────────────────────────────┘
+│  Trusted Devices   │
+└────────────────────┘
 ```
 
-### Tier Definitions & Firewall Policy
+### VLAN Table
 
-| Tier | VLAN | Subnet | Description | Allowed To Reach |
-|---|---|---|---|---|
-| **Management** | 10 | `10.10.10.0/24` | Security tools, monitoring, SIEM | All tiers (read-only/monitor) |
-| **Internal** | 20 | `192.168.20.0/24` | Simulated corporate environment | Management (log forwarding only) |
-| **DMZ** | 30 | `172.16.30.0/24` | Attack simulation, internet-exposed services | Internet only; blocked from Internal & Management |
-| **Untrusted** | 99 | `192.168.99.0/24` | IoT, personal devices, smart TVs | Internet only; fully isolated |
+| Zone | VLAN | Subnet | Managed By | Purpose |
+| --- | --- | --- | --- | --- |
+| Management | 10 | 10.10.10.0/24 | OPNsense | SIEM tools, Technitium DNS, monitoring |
+| Internal Lab | 20 | 192.168.20.0/24 | OPNsense | AD domain, victim workstations |
+| Personal | 40 | 10.40.40.0/24 | OPNsense | iOS devices, Apple TVs (Bonjour/AirPlay) |
+| DMZ | 50 | 172.16.50.0/24 | OPNsense | Jellyfin, Nextcloud, WireGuard VPN endpoint |
+| Untrusted | 99 | 192.168.99.0/24 | MikroTik | IoT, Ring Alarm, smart home devices |
 
-**Key firewall rules enforced by MikroTik:**
-- Untrusted → any internal tier: **DENY ALL**
-- DMZ → Internal or Management: **DENY ALL**
-- Internal → Management: **LOG FORWARDING ONLY** (ports 9997, 1514)
-- Management → all tiers: **ALLOW** (monitoring/passive only)
+### Inter-Zone Firewall Policy
+
+| Source | Destination | Policy |
+| --- | --- | --- |
+| Untrusted (99) | Any internal VLAN | ❌ DENY ALL |
+| DMZ (50) | Internal (20) or Management (10) | ❌ DENY ALL |
+| Internal (20) | Management (10) | ⚠️ LOG FORWARDING ONLY (ports 9997, 1514) |
+| Management (10) | All tiers | ✅ ALLOW (monitoring / passive only) |
+| Personal (40) | DMZ (50) | ✅ ALLOW (Jellyfin, Nextcloud access) |
+| VPN clients (WireGuard) | DMZ (50) | ✅ ALLOW |
+| VPN clients (WireGuard) | Internal (20) or Management (10) | ❌ DENY |
 
 ---
 
 ## Virtual Machines
 
-All VMs managed in Proxmox VE with snapshots before each exercise for clean rollback. VM IDs follow a structured numbering scheme by tier.
+All VMs managed in Proxmox VE with snapshots before each exercise for clean rollback.
 
-### Tier 1 — Management (VLAN 10)
+### pve-srv1 — Primary Server
 
-| VM ID | Name | OS | RAM | Role |
-|---|---|---|---|---|
-| 101 | `splunk-siem` | Ubuntu 22.04 | 8 GB | Splunk Free — log ingestion, search, dashboards |
-| 102 | `wazuh` | OVA (Wazuh 4.x) | 8 GB | Wazuh SIEM/XDR — endpoint detection, alerts |
-| 103 | `sec-onion` | Security Onion 2 | 8 GB | IDS/IPS, Zeek, Suricata, PCAP |
-| 104 | `pihole` | Debian (Pi-hole) | 1 GB | DNS filtering, query logging, threat intel blocklists |
+| VMID | Name | OS | RAM | VLAN | Status | Role |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | opnsense | OPNsense (FreeBSD) | 2GB | trunk | 🔲 Planned | Internal firewall/router for VLANs 10/20/40/50 |
+| 101 | splunk-siem | Ubuntu 22.04 | 8GB | 10 | 🔲 Planned | Splunk Free — log ingestion, SPL, dashboards |
+| 102 | wazuh | Wazuh OVA 4.x | 8GB | 10 | 🔲 Planned | Wazuh SIEM/XDR — endpoint detection, alerting |
+| 103 | sec-onion | Security Onion 2 | 8GB | 10 | 🔲 Planned | Zeek, Suricata, passive PCAP, IDS/IPS |
+| 104 | technitium-dns | Ubuntu 22.04 | 1GB | 10 | 🔲 Planned | Internal recursive/authoritative DNS (lab.local) |
+| 105 | nextcloud | Ubuntu 22.04 | 2GB | 50 | 🔲 Planned | Personal cloud storage |
 
-### Tier 2 — Internal (VLAN 20)
+### pve-nuc1 — Internal Tier
 
-| VM ID | Name | OS | RAM | Role |
-|---|---|---|---|---|
-| 201 | `corp-dc` | Windows Server 2022 | 6 GB | Active Directory DC, DNS, DHCP |
-| 202 | `corp-win10` | Windows 10 Pro | 4 GB | Victim workstation — Sysmon, Wazuh agent |
-| 203 | `corp-ubuntu` | Ubuntu 22.04 | 2 GB | Linux victim — Apache, SSH, Wazuh agent |
+| VMID | Name | OS | RAM | VLAN | Status | Role |
+| --- | --- | --- | --- | --- | --- | --- |
+| 201 | corp-dc | Windows Server 2022 | 6GB | 20 | 🔲 Planned | Active Directory DC, DNS, DHCP |
+| 202 | corp-win10 | Windows 10 Pro | 4GB | 20 | 🔲 Planned | Victim workstation — Sysmon, Wazuh agent |
+| 203 | corp-ubuntu | Ubuntu 22.04 | 2GB | 20 | 🔲 Planned | Linux victim — Apache, SSH, Wazuh agent |
 
-### Tier 3 — DMZ (VLAN 30)
+### pve-nuc2 — Attack / DMZ Tier
 
-| VM ID | Name | OS | RAM | Role |
-|---|---|---|---|---|
-| 301 | `kali` | Kali Linux 2024 | 4 GB | Offensive tools, attack simulation |
-| 302 | `remnux` | REMnux | 2 GB | Isolated malware analysis (no network route) |
+| VMID | Name | OS | RAM | VLAN | Status | Role |
+| --- | --- | --- | --- | --- | --- | --- |
+| 301 | kali | Kali Linux 2024 | 4GB | 50 | 🔲 Planned | Offensive tools, attack simulation |
+| 302 | remnux | REMnux | 2GB | isolated | 🔲 Planned | Malware analysis — no network route |
 
 ---
 
-## Skills in Progress
+## Services & Software Stack
 
-> Documenting my learning journey as a complete beginner. Each item reflects real hands-on time in the lab.
+### Currently Deployed
 
-| Skill | Tool(s) | Status | Notes |
-|---|---|---|---|
-| Log analysis & SIEM | Splunk, Wazuh | 🔄 Learning | Splunk Fundamentals 1 complete; Wazuh agents deployed |
-| Endpoint detection | Wazuh agents | 🔄 Learning | Agents installed on Internal tier VMs |
-| Packet analysis | Wireshark, tcpdump | 🔄 Learning | Analyzing PCAPs from TryHackMe labs |
-| Intrusion detection | Suricata, Snort | 🔄 Learning | Running via Security Onion |
-| Vulnerability scanning | Nmap, Nessus Essentials | 🔄 Learning | Scanning Internal tier VMs |
-| Hypervisor management | Proxmox VE | 🔄 Learning | VM creation, snapshots, VLAN config |
-| Windows administration | Windows Server 2022 | 🔄 Learning | AD domain, GPOs, audit policies |
-| Network segmentation | MikroTik, 802.1Q | ✅ Functional | 4-VLAN architecture deployed and routing correctly |
-| DNS security | Pi-hole | ✅ Functional | Blocking malicious domains; query logs forwarded to Splunk |
-| Linux CLI | Bash | 🔄 Learning | Comfortable with navigation, grep, pipes, log parsing |
+| Service | Host | VLAN | Purpose |
+| --- | --- | --- | --- |
+| Proxmox VE 8.4 | All nodes | mgmt | Hypervisor cluster — VM/LXC management, snapshots |
+
+
+### Planned / In Progress
+
+| Service | Host | VLAN | Purpose |
+| --- | --- | --- | --- |
+| OPNsense | VM 100 (pve-srv1) | trunk | Internal firewall/router for trusted VLANs |
+| Splunk Free | VM 101 (pve-srv1) | 10 | Primary SIEM — log ingestion, SPL search, dashboards |
+| Wazuh 4.x | VM 102 (pve-srv1) | 10 | Endpoint detection, XDR, agent-based alerting |
+| Security Onion 2 | VM 103 (pve-srv1) | 10 | Network monitoring — Zeek, Suricata, PCAP |
+| Technitium DNS | VM 104 (pve-srv1) | 10 | Internal recursive DNS (lab.local) |
+| Nextcloud | VM 107 (pve-srv1) | 50 | Personal file storage |
+| WireGuard | OPNsense plugin | 50 | Remote access VPN — iOS/tvOS clients → DMZ only |
+| Sysmon | corp-dc, corp-win10 | 20 | Enriched Windows process/network/file telemetry |
+| Wazuh Agents | All Internal VMs | 20 | Endpoint telemetry → Wazuh manager |
+
+### Future / Stretch Goals
+
+| Service | Purpose |
+| --- | --- |
+| Frigate NVR | Security camera NVR with local recording |
+| Ollama (vision LLM) | AI-assisted camera footage triage pipeline |
+| OpenVPN / split tunnel | Alternative remote access evaluation |
+| TheHive | Incident case management — SOC Tier 1/2 workflow practice |
+| Velociraptor | Endpoint live response and threat hunting |
+
+---
+
+## Build Progress
+
+| Phase | Name | Status |
+| --- | --- | --- |
+| 0 | Hardware & Physical Setup | 🔄 In Progress — cabling pending |
+| 1 | Proxmox on Primary Server | ✅ Complete |
+| 2 | MikroTik & VLAN Network | 🚧 Blocked — NetInstall recovery in progress |
+| 3 | Proxmox NUCs & Cluster | ✅ Complete |
+| 4 | Download & Stage Installation Media | 🔄 In Progress — Wazuh OVA / REMnux QCOW2 import pending |
+| 5 | Management Tier VMs | 🔲 Not Started |
+| 6 | Internal Tier VMs | 🔲 Not Started |
+| 7 | DMZ Tier VMs | 🔲 Not Started |
+| 8 | Log Forwarding & Splunk Inputs | 🔲 Not Started |
+| 9 | Splunk Detection Rules & Dashboards | 🔲 Not Started |
+| 10 | Attack Simulations & Detection Validation | 🔲 Not Started |
 
 ---
 
@@ -161,18 +219,18 @@ All VMs managed in Proxmox VE with snapshots before each exercise for clean roll
 ```
 Internal Tier VMs
   corp-dc (Windows Server)  ──┐  Winlogbeat + Wazuh Agent
-  corp-win10 (Windows 10)   ──┼─────────────────────────────► Wazuh Manager (VM 102)
-  corp-ubuntu (Ubuntu)      ──┘  Filebeat + Wazuh Agent               │
-                                                                        │ Wazuh alerts
-Pi-hole (DNS logs) ─────────────────────────────────────────► Splunk (VM 101)
-MikroTik (Syslog) ──────────────────────────────────────────►
-Security Onion (Zeek/Suricata) ─────────────────────────────►
+  corp-win10 (Windows 10)   ──┼──────────────────────────► Wazuh Manager (VM 102)
+  corp-ubuntu (Ubuntu)      ──┘  Filebeat + Wazuh Agent                │
+                                                                       │ Wazuh alerts
+Technitium (DNS logs) ────────────────────────────────────────► Splunk (VM 101)
+MikroTik (Syslog) ─────────────────────────────────────────►
+Security Onion (Zeek/Suricata) ────────────────────────────►
 ```
 
 **Log sources ingested into Splunk:**
 
 | Source | Key Events |
-|---|---|
+| --- | --- |
 | Windows Security Log | 4624/4625 (logon), 4720 (account created), 4740 (lockout) |
 | Sysmon | Process creation (1), network connections (3), file events (11) |
 | Wazuh alerts | Rule-based endpoint detections forwarded to Splunk |
@@ -204,11 +262,10 @@ index=pihole blocked=true
 ```
 
 **Wazuh rules triggered in lab:**
+
 - SSH brute-force (rule 5710/5712) — generated via Hydra attack from Kali
 - Windows audit policy change (rule 18104) — tested via GPO modification
 - New user account created (rule 18152) — tested via `net user` command
-
-**Next steps:** Build a Splunk dashboard correlating Wazuh endpoint alerts with network events from Zeek; write first custom Wazuh rule.
 
 ---
 
@@ -217,15 +274,10 @@ index=pihole blocked=true
 **Goal:** Capture and interpret network traffic across tier boundaries to identify scanning, lateral movement, and C2 patterns.
 
 **Setup:**
+
 - Managed switch mirror port sends all VLAN traffic to Security Onion (VM 103)
 - Security Onion running Zeek (connection metadata) and Suricata (signature-based IDS)
 - MikroTik firewall logs forwarded to Splunk for inter-tier traffic visibility
-
-**What I've practiced:**
-- Capturing traffic with `tcpdump` on the Security Onion monitoring interface
-- Identifying an Nmap SYN scan in Wireshark — sequential ports, SYN-only packets, no handshake completion
-- Reading Zeek `conn.log` fields: `id.orig_h`, `id.resp_p`, `proto`, `conn_state`, `duration`
-- Correlating Pi-hole blocked queries with connection attempts in Zeek
 
 **Wireshark filters learned:**
 
@@ -234,10 +286,7 @@ index=pihole blocked=true
 dns.flags.response == 0
 
 # Traffic between specific tiers
-ip.src == 192.168.20.0/24 && ip.dst == 172.16.30.0/24
-
-# HTTP GET requests
-http.request.method == "GET"
+ip.src == 192.168.20.0/24 && ip.dst == 172.16.50.0/24
 
 # Failed TCP connections (RST)
 tcp.flags.reset == 1
@@ -245,8 +294,6 @@ tcp.flags.reset == 1
 # Large DNS queries — potential tunneling indicator
 dns && dns.qry.name.len > 50
 ```
-
-**Next steps:** Analyze a C2 beacon PCAP from TryHackMe; write a Suricata rule based on observed traffic patterns.
 
 ---
 
@@ -256,34 +303,16 @@ dns && dns.qry.name.len > 50
 
 **Tools:** Nmap (port/service discovery), Nessus Essentials (authenticated scanning)
 
-**Scanning workflow:**
-
-```bash
-# Phase 1: Discover live hosts in Internal tier
-nmap -sn 192.168.20.0/24
-
-# Phase 2: Service and version enumeration
-nmap -sV -sC -p- 192.168.20.0/24 -oN internal-scan.txt
-
-# Phase 3: Vulnerability scripts
-nmap --script vuln 192.168.20.10
-
-# Phase 4: Authenticated Nessus scan
-# (Configured via Nessus UI with domain credentials)
-```
-
 **Sample findings on intentionally unpatched `corp-dc`:**
 
 | Finding | CVSS | Notes |
-|---|---|---|
+| --- | --- | --- |
 | SMBv1 Enabled | 9.8 | EternalBlue-exploitable; kept for lab practice |
 | Missing Windows patches | Varies | Intentionally unpatched |
-| RDP — NLA not enforced | 7.5 | Easy credential relay target |
+| RDP — NLA not enforced | 7.5 | Credential relay target |
 | Weak Kerberos config | 8.1 | Kerberoastable service accounts configured |
 
-**Key insight so far:** The same CVE-2017-0144 (EternalBlue, CVSS 9.8) on an internet-facing server vs. an isolated Internal VLAN with no DMZ access has completely different real-world risk. Context matters as much as the score.
-
-**Next steps:** Document full remediation steps for each finding; re-scan after patching to verify.
+**Key insight:** The same CVE-2017-0144 (EternalBlue, CVSS 9.8) on an internet-facing server vs. an isolated Internal VLAN with no DMZ access has completely different real-world risk. Context matters as much as the score.
 
 ---
 
@@ -293,27 +322,17 @@ nmap --script vuln 192.168.20.10
 
 **Domain:** `lab.local` hosted on `corp-dc` (VM 201)
 
-**What I've configured:**
-- Domain controller with DNS and DHCP
-- `corp-win10` domain-joined
-- Organizational Units: IT, Finance, HR (simulating business structure)
-- User accounts with varying privilege levels
-- Group Policy Objects: audit policy, PowerShell logging, AppLocker (in progress)
-- Intentionally misconfigured accounts for practice: Kerberoastable SPN, unconstrained delegation
-
 **Audit policies enabled:**
 
 | Policy | Events Generated |
-|---|---|
+| --- | --- |
 | Audit Logon Events | 4624 (success), 4625 (failure), 4634 (logoff) |
 | Audit Account Management | 4720 (created), 4740 (lockout), 4732 (group change) |
 | Audit Process Creation | 4688 + command line logging |
 | Audit Policy Change | 4719 |
 | PowerShell Script Block Logging | 4104 |
 
-**Why this matters for SOC work:** Active Directory is present in the vast majority of enterprise environments. The misconfigured accounts (Kerberoastable SPNs, unconstrained delegation) are intentional — the goal is to generate realistic attack telemetry and then find it in Splunk and Wazuh.
-
-**Next steps:** Simulate a Kerberoasting attack from Kali, then hunt for it in Splunk using Event ID 4769.
+Intentionally misconfigured accounts (Kerberoastable SPNs, unconstrained delegation) are configured to generate realistic attack telemetry.
 
 ---
 
@@ -321,100 +340,27 @@ nmap --script vuln 192.168.20.10
 
 **Goal:** Understand attacker techniques well enough to detect and hunt for them on the defensive side.
 
-> ⚠️ All offensive activity is performed exclusively against VMs I own, within the lab environment. The DMZ VLAN has no route to Internal or Management tiers — Kali cannot reach production systems.
+> ⚠️ All offensive activity is performed exclusively against VMs I own, within the isolated lab environment.
 
-**Tools used:** Nmap, Metasploit, Hydra, Netcat, CrackMapExec (learning)
-
-**Exercises completed:**
-
-| Exercise | Attack Tool | What I Found on the Blue Side |
-|---|---|---|
-| Port scan — Internal tier | Nmap SYN scan | Zeek conn.log: high volume SYN to sequential ports; Suricata alert fired |
-| SSH brute-force — corp-ubuntu | Hydra | auth.log: rapid 4xx failures; Wazuh rule 5710 triggered; Splunk alert |
-| Metasploit — Metasploitable VM | `exploit/multi/handler` | Observed reverse shell traffic in Wireshark; Suricata ET rule fired |
-| DNS query flood | custom script | Pi-hole logs: anomalous query volume; Splunk dashboard spike |
-
-**Key insight:** Running the attack and then finding it in the logs is the most effective learning method. After running a Hydra brute-force and seeing exactly which log lines it generates, writing the Splunk detection query becomes intuitive rather than theoretical.
-
-**Next steps:** Chain scan → exploit → persistence against a lab VM, then write a complete incident report documenting the full attack timeline from the defensive perspective.
+| Exercise | Attack Tool | Blue-Side Detection |
+| --- | --- | --- |
+| Port scan — Internal tier | Nmap SYN scan | Zeek conn.log sequential SYN pattern; Suricata alert |
+| SSH brute-force — corp-ubuntu | Hydra | auth.log rapid failures; Wazuh rule 5710; Splunk alert |
+| Metasploit — Metasploitable VM | `exploit/multi/handler` | Reverse shell traffic in Wireshark; Suricata ET rule |
+| DNS query flood | Custom script | Pi-hole anomalous query volume spike in Splunk |
 
 ---
 
-## CTF & Platform Writeups
+## Key Outcomes
 
-TryHackMe, Hack The Box, and other CTF writeups are tracked in a dedicated repository:
-
-> 📁 **[github.com/thelogansmith/CTFs](https://github.com/thelogansmith/CTFs)**
-
-That repo contains room writeups, challenge solutions, and platform progress. Labs completed there that involve tools deployed in this homelab (Splunk, Wazuh, Wireshark, Nmap) are cross-referenced in the exercises above.
-
----
-
-## Tools & Technologies
-
-### Currently Deployed
-
-| Tool | Tier | Purpose |
-|---|---|---|
-| Proxmox VE 8.4 | Infrastructure | Hypervisor, VM management, snapshots |
-| Splunk Free | Management | Log ingestion, SPL search, dashboards, alerting |
-| Wazuh 4.x | Management | Endpoint detection, SIEM/XDR, agent-based alerting |
-| Security Onion 2 | Management | Zeek, Suricata, passive PCAP, IDS/IPS |
-| Pi-hole | Management | DNS filtering, query logging, blocklist-based threat intel |
-| Sysmon | Internal | Enriched Windows process/network/file telemetry |
-| Wazuh Agents | Internal | Endpoint telemetry forwarded to Wazuh manager |
-| Wireshark / tcpdump | Management | Manual packet inspection |
-| Nmap | DMZ/Management | Port scanning, service enumeration |
-| Nessus Essentials | Management | Authenticated vulnerability scanning |
-| Kali Linux | DMZ | Attack simulation only — no Internal/Management access |
-| MikroTik RouterOS | Infrastructure | VLAN trunking, inter-tier firewall, syslog forwarding |
-
-### On the Learning List
-
-| Tool | Why It Matters for SOC |
-|---|---|
-| Sigma Rules | Vendor-agnostic detection rules — portable across SIEM platforms |
-| MITRE ATT&CK Navigator | Maps lab exercises to industry-standard TTP framework |
-| TheHive | Incident case management — common in Tier 1/2 SOC workflows |
-| Velociraptor | Endpoint live response and threat hunting |
-| Python | Log parsing, IOC extraction, SIEM API automation |
-
----
-
-## Learning Roadmap
-
-```
-Phase 1 — Foundations (Current)
-├── ✅ Deploy Proxmox on dedicated hardware (24-core Xeon, 125 GB RAM)
-├── ✅ Configure 4-VLAN architecture (Management / Internal / DMZ / Untrusted)
-├── ✅ Deploy Splunk — ingest Windows, Linux, firewall, DNS logs
-├── ✅ Deploy Wazuh — agents on all Internal tier VMs
-├── ✅ Install Sysmon on Windows VMs
-├── ✅ Configure Pi-hole with query logging → Splunk
-├── ✅ Isolate IoT / personal devices to Untrusted VLAN
-├── 🔄 Complete TryHackMe SOC Level 1 path
-└── 🔄 Write first Splunk alert rules
-
-Phase 2 — Detection & Analysis
-├── Build Splunk dashboards for auth, network, and endpoint events
-├── Write custom Wazuh detection rules
-├── Simulate Kerberoasting → detect in Splunk (Event ID 4769)
-├── Simulate full attack chain → write formal incident report
-└── Analyze C2 beacon PCAP from TryHackMe challenge
-
-Phase 3 — Intermediate Skills
-├── Write Suricata rules based on observed attack traffic
-├── Practice threat hunting with MITRE ATT&CK Navigator
-├── Set up TheHive for incident case management
-├── Learn Python for log parsing and Splunk API automation
-└── Pursue CompTIA Security+ or BTL1 certification
-
-Phase 4 — Advanced Topics
-├── Memory forensics with Volatility (REMnux)
-├── Basic static malware analysis (FlareVM)
-├── Publish Sigma detection rules to public repository
-└── Introduce a honeynet to capture and analyze opportunistic attacks
-```
+| Outcome | SOC Skill Demonstrated | Status |
+| --- | --- | --- |
+| 5-zone VLAN segmentation with zero-trust firewall policy | Network architecture, ACL design | 🔄 In Progress |
+| Multi-source log pipeline → Splunk | Log ingestion, data onboarding, sourcetype management | 🔲 Planned |
+| Custom SPL detection rules (brute-force, PowerShell, Kerberoasting) | Detection engineering, SPL | 🔲 Planned |
+| SOC dashboard: endpoint + network + DNS correlation | SIEM analysis, dashboard design | 🔲 Planned |
+| Full attack simulation → incident report with MITRE ATT&CK mapping | Threat hunting, IR documentation | 🔲 Planned |
+| WireGuard remote access (iOS/tvOS clients → DMZ only) | VPN architecture, zero-trust remote access | 🔲 Planned |
 
 ---
 
@@ -423,7 +369,7 @@ Phase 4 — Advanced Topics
 Techniques observed in lab exercises. Grows as simulations are completed.
 
 | Tactic | Technique | ID | How Observed | Detected By |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Reconnaissance | Network Service Discovery | T1046 | Nmap SYN scan from Kali | Zeek conn.log, Suricata |
 | Initial Access | Valid Accounts (brute-forced) | T1078 | Hydra SSH attack | auth.log, Wazuh rule 5710, Splunk |
 | Execution | PowerShell | T1059.001 | TryHackMe rooms | Sysmon Event 1, Event 4104 |
@@ -434,30 +380,78 @@ Techniques observed in lab exercises. Grows as simulations are completed.
 
 ---
 
-## Repository Structure
+## Learning Roadmap
 
 ```
-homelab/
-├── README.md                        ← This file
-├── infrastructure/
-│   ├── network-diagram.png
-│   ├── proxmox-vm-inventory.md
-│   ├── vlan-firewall-rules.md       ← MikroTik rule documentation
-│   └── sysmon-config.xml
-├── splunk/
-│   ├── searches/                    ← SPL queries by use case
-│   └── dashboards/                  ← Dashboard exports
-├── wazuh/
-│   └── custom-rules/                ← Local rule overrides
-├── lab-exercises/
-│   ├── nmap-scans/                  ← Saved scan output files
-│   ├── wireshark-captures/          ← Annotated PCAPs
-│   └── incident-reports/            ← Post-exercise IR writeups
-└── notes/
-    ├── tools/                       ← Notes per tool as learned
-    └── concepts/                    ← Networking, AD, protocols
+Phase 1 — Foundations (Current)
+├── ✅ Deploy Proxmox on dedicated hardware (24-core Xeon, 128GB RAM)
+├── ✅ Configure 3-node Proxmox cluster
+├── 🔄 Recover MikroTik RB4011 via NetInstall (RouterOS 6.49.18)
+├── 🔄 Configure 5-VLAN architecture (Management / Internal / Personal / DMZ / Untrusted)
+├── 🔲 Deploy OPNsense VM — internal firewall/router
+├── 🔲 Deploy Splunk — ingest Windows, Linux, firewall, DNS logs
+├── 🔲 Deploy Wazuh — agents on all Internal tier VMs
+├── 🔲 Install Sysmon on Windows VMs
+├── 🔲 Configure Technitium DNS (lab.local)
+└── 🔲 Complete TryHackMe SOC Level 1 path
+
+Phase 2 — Detection & Analysis
+├── Build Splunk dashboards for auth, network, and endpoint events
+├── Write custom Wazuh detection rules
+├── Simulate Kerberoasting → detect in Splunk (Event ID 4769)
+├── Simulate full attack chain → write formal incident report
+└── Deploy WireGuard on OPNsense for remote access (iOS/tvOS)
+
+Phase 3 — Intermediate Skills
+├── Write Suricata rules based on observed attack traffic
+├── Practice threat hunting with MITRE ATT&CK Navigator
+├── Set up TheHive for incident case management
+├── Learn Python for log parsing and Splunk API automation
+└── Pursue CompTIA Security+ or BTL1 certification
+
+Phase 4 — Advanced Topics
+├── Memory forensics with Volatility (REMnux)
+├── Basic static malware analysis
+├── Publish Sigma detection rules to public repository
+├── Frigate NVR + Ollama vision pipeline for security cameras
+└── Introduce a honeynet to capture opportunistic attacks
 ```
 
 ---
 
-*Actively learning and building. All offensive techniques performed exclusively within the isolated lab environment against systems I own. Network architecture based on the NCyTE VCCC three-tier model.*
+## Repository Structure
+
+```
+homelab/
+├── README.md                         ← This file
+├── phase-0-hardware-physical-setup/
+├── phase-1-proxmox-primary-server/
+├── phase-2-mikrotik-vlan-network/
+├── phase-3-proxmox-nucs-cluster/
+├── phase-4-installation-media/
+├── phase-5-management-tier-vms/
+├── phase-6-internal-tier-vms/
+├── phase-7-dmz-tier-vms/
+├── phase-8-log-forwarding-splunk/
+├── phase-9-splunk-detection-dashboards/
+├── phase-10-attack-simulations/
+├── infrastructure/
+│   ├── network-diagram.png
+│   ├── proxmox-vm-inventory.md
+│   └── vlan-firewall-rules.md
+├── splunk/
+│   ├── searches/                     ← SPL queries by use case
+│   └── dashboards/                   ← Dashboard exports
+├── wazuh/
+│   └── custom-rules/
+├── lab-exercises/
+│   ├── nmap-scans/
+│   ├── wireshark-captures/
+│   └── incident-reports/
+└── notes/
+    ├── tools/
+    └── concepts/
+```
+
+
+*All offensive techniques performed exclusively within the isolated lab environment against systems I own. Network architecture based on the NCyTE VCCC three-tier model.*
