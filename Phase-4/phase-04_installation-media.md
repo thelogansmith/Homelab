@@ -5,7 +5,7 @@
 ---
 ## Tasks
 
-### ISOs — Upload to Proxmox ISO Storage`
+### ISOs — Upload to Proxmox ISO Storage
 - [x]  **Ubuntu Server 24.04 LTS ISO**
     - Skills: LTS release cadence awareness, identifying correct image for VM workloads
     - Source: [https://ubuntu.com/download/server](https://ubuntu.com/download/server)
