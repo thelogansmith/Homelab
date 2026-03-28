@@ -75,5 +75,3 @@ SHA256 verification check cmd via powershell: Get-FileHash (File location) -Algo
 *Hashes compared programmatically in Excel; case-normalized comparison returned TRUE for all verified files.*
 
 *Windows and VirtIO ISOs sourced directly from authoritative Microsoft and Fedora-affiliated CDNs over HTTPS. No SHA256 hashes are published by these vendors for these specific artifacts. Integrity assurance relies on TLS transport security and file size validation.*
-## Write-Up Draft
-<!-- draft before GitHub push -->
