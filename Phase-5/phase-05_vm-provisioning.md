@@ -60,7 +60,7 @@
     - CPU: 4 cores
     - RAM: 8GB
     - Disk: 100GB (Splunk indexes grow; allocate generously)
-    - ISO: Ubuntu Server 22.04
+    - ISO: Ubuntu Server 24.04
   - VLAN: 10 (Management) — `10.10.10.0/24`
   - Expected IP: DHCP from OPNsense (or reserve static lease)
   - Ping test: `ping 10.10.10.1` (OPNsense VLAN 10 interface) ✅
@@ -109,7 +109,7 @@
     - CPU: 1 core
     - RAM: 1GB
     - Disk: 16GB
-    - ISO: Ubuntu Server 22.04
+    - ISO: Ubuntu Server 24.04
   - VLAN: 10 (Management) — `10.10.10.0/24`
   - Expected IP: Static recommended (DNS servers should not rely on DHCP)
   - Install Technitium after OS install:
@@ -130,7 +130,7 @@
     - CPU: 2 cores
     - RAM: 2GB
     - Disk: 64GB
-    - ISO: Ubuntu Server 22.04
+    - ISO: Ubuntu Server 24.04
   - VLAN: 50 (DMZ) — `172.16.50.0/24`
   - Expected IP: DHCP from OPNsense VLAN 50
   - Ping test: `ping 172.16.50.1` (OPNsense VLAN 50 interface) ✅
@@ -174,7 +174,7 @@
 
 ---
 
-#### VM 203 — corp-ubuntu (Ubuntu Server 22.04)
+#### VM 203 — corp-ubuntu (Ubuntu Server 24.04)
 
 - [ ] **Create and install VM 203: corp-ubuntu**
   - Skills: Ubuntu Server installation, OpenSSH server setup during install, hostname and static IP configuration
@@ -182,7 +182,7 @@
     - CPU: 2 cores
     - RAM: 2GB
     - Disk: 32GB
-    - ISO: Ubuntu Server 22.04
+    - ISO: Ubuntu Server 24.04
   - VLAN: 20 (Internal Lab) — `192.168.20.0/24`
   - Expected IP: DHCP from OPNsense VLAN 20
   - Ping test: `ping 192.168.20.1` (OPNsense VLAN 20 interface) ✅
