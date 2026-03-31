@@ -262,8 +262,6 @@ Enable DHCP on all four interfaces
 **Phase:** 5 — VM Provisioning & OS Installation  
 **Scope:** Interface assignment, VLAN routing, and DHCP configuration. Firewall rules are NOT configured in this document — that is handled in a later phase.
 
----
-
 #### NIC Architecture — Per-Bridge Design
 
 OPNsense VM 100 was provisioned with **five dedicated NICs**, each mapped to a separate Proxmox bridge rather than a single trunk interface with VLAN sub-interfaces. This is a deliberate design choice: each VLAN gets its own virtual wire directly into OPNsense, which simplifies troubleshooting and avoids tagged frame handling inside the VM.
@@ -279,8 +277,6 @@ OPNsense VM 100 was provisioned with **five dedicated NICs**, each mapped to a s
 > 📷 **Photo:** Proxmox VM 100 hardware view showing all five network devices with their bridge assignments and MAC addresses.
 
 Because each VLAN has a dedicated NIC, **no VLAN sub-interfaces are required inside OPNsense.** vtnet2/3/4 are assigned directly as OPNsense interfaces — not as tagged children of a parent trunk.
-
----
 
 #### Setup Wizard
 
@@ -329,8 +325,6 @@ Block RFC1918 and Block Bogon are both enabled. This is correct for a WAN interf
 
 The LAN interface maps to vtnet1 (vmbr10) and serves as the VLAN 10 Management gateway. The wizard assigns an allow-all firewall rule to LAN by default — this is the only interface with a default allow rule. All OPT interfaces (VLAN 20/40/50) default to block-all until rules are explicitly added in a later phase.
 
----
-
 #### Interface Assignment
 
 After the wizard, vtnet2/3/4 were unassigned. They were added and named via **Interfaces → Assignments**.
@@ -344,8 +338,6 @@ After the wizard, vtnet2/3/4 were unassigned. They were added and named via **In
 | [VLAN40PERSONAL] | opt2 | vtnet3 | Personal |
 | [VLAN50DMZ] | opt3 | vtnet4 | DMZ |
 | [WAN] | wan | vtnet0 | WAN upstream |
-
----
 
 #### Interface Configuration
 
@@ -382,8 +374,6 @@ Configured by the setup wizard. No changes required post-wizard.
 | IPv4 Config Type | Static IPv4 |
 | IPv4 Address | 172.16.50.1/24 |
 
----
-
 #### DHCP Configuration — Kea DHCPv4
 
 OPNsense 24.x ships with **Kea DHCPv4** as the default DHCP server (replacing the legacy ISC DHCPv4 backend). Subnets are configured individually under **Services → Kea DHCPv4 → Subnets**.
@@ -409,8 +399,6 @@ Kea failed to start after initial subnet entry. Root cause: the DMZ subnet was e
 
 > ⚠️ Kea will refuse to start if any subnet entry does not encompass its interface's configured IP address. Validate all subnet/interface IP pairs before applying.
 
----
-
 #### Current State & Limitations
 
 OPNsense routing and DHCP configuration is complete. The following validation is deferred until the MikroTik RB4011 is restored and the TP-Link switch is VLAN-configured:
@@ -421,5 +409,231 @@ OPNsense routing and DHCP configuration is complete. The following validation is
 
 VLAN 10 (Management) is functional from any host directly connected to vmbr10, since the LAN default allow rule is in place and the Proxmox management network uses this bridge.
 
+---
+ 
+### VM 101 — splunk-siem
+ 
+**Node:** pve-srv1  
+**VLAN:** 10 (Management) — `10.10.10.0/24`  
+**Storage:** rpool-data
+ 
+#### Configuration
+ 
+| Setting | Value |
+|---------|-------|
+| Machine | q35 |
+| BIOS | OVMF (UEFI) |
+| CPU | 4 cores (host) |
+| RAM | 8GB |
+| Disk | VirtIO Block, 100GB, rpool-data |
+| Network | vmbr10, VirtIO |
+| OS | Ubuntu Server 24.04 LTS |
+ 
+#### Verification
+ 
+- IP assigned via DHCP from OPNsense VLAN 10: `10.10.10.x`
+- `ping 10.10.10.1` — ✅ Pass
+ 
+---
+ 
+### VM 102 — Wazuh
+ 
+**Node:** pve-srv1  
+**VLAN:** 10 (Management) — `10.10.10.0/24`  
+**Storage:** rpool-data  
+**Source:** Wazuh OVA (pre-built all-in-one appliance)
+ 
+#### Final Working Configuration
+ 
+| Setting | Value |
+|---------|-------|
+| Machine | i440fx |
+| BIOS | SeaBIOS |
+| CPU | 4 cores (host) |
+| RAM | 8GB |
+| Disk | **SCSI (scsi0)**, 25GB, rpool-data |
+| Network | vmbr10, VirtIO |
+| OS | Wazuh OVA (Ubuntu-based) |
+ 
+#### Import Process
+ 
+The Wazuh OVA was extracted and the VMDK converted to QCOW2 prior to import:
+ 
+```bash
+# Extract OVA
+cd /var/lib/vz/images/
+tar -xvf wazuh-*.ova
+ 
+# Convert VMDK to QCOW2
+qemu-img convert -f vmdk -O qcow2 wazuh-*.vmdk wazuh.qcow2
+ 
+# Verify — confirmed clean (no backing file, corrupt: false)
+qemu-img info /var/lib/vz/images/wazuh.qcow2
+# file format: qcow2
+# virtual size: 25 GiB
+# disk size: 5.06 GiB
+ 
+# Import to rpool-data
+qm importdisk 102 /var/lib/vz/images/wazuh.qcow2 rpool-data
+```
+ 
+#### Issues Encountered
+ 
+##### Issue 1 — Blank screen / blinking cursor on boot (first attempt)
+ 
+**Symptom:** VM displayed the Wazuh splash screen, then a blank screen with a blinking cursor. No boot output, no GRUB menu, no kernel messages.
+ 
+**Root cause:** The shell VM was initially created with `q35` + `OVMF (UEFI)`. The Wazuh OVA is built for legacy BIOS. UEFI firmware could not locate a bootable EFI partition on the OVA disk, causing a silent hang.
+ 
+**Fix attempted:** Switched to `i440fx` + `SeaBIOS`, removed EFI disk. Issue persisted.
+ 
+##### Issue 2 — Blank screen / blinking cursor persisted after BIOS fix
+ 
+**Symptom:** Same blinking cursor behavior after correcting to `i440fx` + `SeaBIOS`.
+ 
+**Root cause:** Disk was initially imported to `local` storage (directory-based, `/var/lib/vz/`) rather than `rpool-data` (ZFS pool). VM was deleted and disk re-imported to `rpool-data`. Issue still persisted, pointing to a second independent problem.
+ 
+**Root cause (confirmed):** The disk was attached as `virtio0` (VirtIO Block). The Wazuh OVA's GRUB bootloader is configured to boot from `/dev/sda` (SCSI device naming). When the disk is presented as a VirtIO device, the OS sees it as `/dev/vda` — GRUB cannot find its root partition and hangs silently, producing only a blinking cursor.
+ 
+**Fix:** Detached the VirtIO disk and re-attached as SCSI:
+ 
+```bash
+qm set 102 --delete virtio0
+qm set 102 --scsi0 rpool-data:vm-102-disk-0,iothread=1
+qm set 102 --boot order=scsi0
+```
+ 
+VM booted successfully after this change.
+ 
+#### Key Lessons
+ 
+- **Wazuh OVA requires `i440fx` + `SeaBIOS`** — not `q35` / OVMF. The OVA has no EFI partition.
+- **Wazuh OVA requires SCSI disk bus** — not VirtIO Block. GRUB inside the OVA targets `/dev/sda`. Presenting the disk as VirtIO (`/dev/vda`) causes a silent GRUB hang with no error output.
+- **Import target matters** — use `rpool-data` (ZFS) on pve-srv1, not `local` (directory). Directory-based storage works for ISOs and source files; ZFS-backed storage is the correct target for VM disks.
+- **First boot takes several minutes** — Wazuh initializes the manager, indexer, and dashboard sequentially on first boot. The blinking cursor during this period is normal after GRUB hands off to the kernel.
+ 
+#### Verification
+ 
+- IP assigned via DHCP from OPNsense VLAN 10: `10.10.10.x`
+- `ping 10.10.10.1` — ✅ Pass
 
+---
+ 
+### VM 103 — Security Onion
+ 
+**Node:** pve-srv1
+**VLAN:** 10 (Management) — `10.10.10.0/24`
+**Storage:** rpool-data
+ 
+#### Configuration
+ 
+| Setting | Value |
+|---------|-------|
+| Machine | q35 |
+| BIOS | OVMF (UEFI) |
+| CPU | 4 cores (host) |
+| RAM | 16GB |
+| Disk | VirtIO Block, 200GB, rpool-data |
+| NIC 1 (management) | vmbr10, VirtIO — `10.10.10.0/24` |
+| NIC 2 (monitoring) | mirror port bridge, VirtIO — no IP |
+| OS | Security Onion 2.4.211 |
+ 
+#### Installation
+ 
+Security Onion 2.4 uses a two-stage install: a base OS install followed by the `so-setup` wizard on first boot.
+ 
+**Setup wizard selections:**
+ 
+| Prompt | Selection |
+|--------|-----------|
+| Install type | Standard (internet access) |
+| Node type | Standalone |
+| Management NIC | First VirtIO NIC (vmbr10) |
+| Management IP | DHCP from OPNsense VLAN 10 |
+| Monitoring NIC | Second VirtIO NIC — no IP, monitor only |
+| Home networks | `10.10.10.0/24`, `192.168.20.0/24`, `10.40.40.0/24`, `172.16.50.0/24` |
+| Allowed management access | `10.10.10.0/24` |
+ 
+The allowed management access range was set to VLAN 10 only (`10.10.10.0/24`). The Security Onion web UI is a management interface and should not be reachable from Internal, Personal, or DMZ VLANs directly — analysts access Security Onion data through Splunk in later phases.
+ 
+#### Issue Encountered — Setup Exits with Memory Error
+ 
+**Symptom:** Selecting "Standard" install type caused the wizard to immediately exit with the message:
+ 
+```
+This install type will fail with less than 16 GB of memory. Exiting setup.
+```
+ 
+**Root cause:** Security Onion 2.4 enforces a hard 16GB RAM minimum for the Standard installation type. The VM was initially spec'd at 8GB, which is half the required minimum.
+ 
+**Fix:** Shut down the VM, updated RAM from 8192 MB to 16384 MB in Proxmox hardware settings, rebooted, and re-ran `so-setup`. The wizard proceeded normally after the memory increase.
+ 
+> ⚠️ Security Onion 2.4 requires a minimum of **16GB RAM** for Standard/Standalone installs. The original 8GB spec was insufficient.
 
+#### Verification
+ 
+- IP assigned via DHCP from OPNsense VLAN 10: `10.10.10.x`
+- `ping 10.10.10.1` — ✅ Pass
+ 
+---
+ 
+### VM 104 — Technitium DNS
+ 
+**Node:** pve-srv1
+**VLAN:** 10 (Management) — `10.10.10.0/24`
+**Storage:** rpool-data
+ 
+#### Configuration
+ 
+| Setting | Value |
+|---------|-------|
+| Machine | q35 |
+| BIOS | OVMF (UEFI) |
+| CPU | 1 core (host) |
+| RAM | 1GB |
+| Disk | VirtIO Block, 16GB, rpool-data |
+| Network | vmbr10, VirtIO |
+| OS | Ubuntu Server 24.04 LTS |
+| IP | Static — `10.10.10.10/24` |
+ 
+Static IP was set via Netplan post-install. DNS servers should not rely on DHCP — a DNS server waiting on a DHCP lease creates a circular dependency at boot.
+ 
+```yaml
+# /etc/netplan/00-installer-config.yaml
+network:
+  version: 2
+  ethernets:
+    ens18:
+      dhcp4: no
+      addresses:
+        - 10.10.10.10/24
+      routes:
+        - to: default
+          via: 10.10.10.1
+      nameservers:
+        addresses: [127.0.0.1]
+```
+ 
+Technitium DNS was installed via the official installer script:
+ 
+```bash
+curl -sSL https://download.technitium.com/dns/install.sh | sudo bash
+```
+ 
+#### Issue Encountered — Web UI Login Failure (Keyboard Input)
+ 
+**Symptom:** After configuring credentials during OS install and saving the password to a password manager, login to the Technitium web UI at `http://10.10.10.10:5380` was rejected. Credentials appeared correct.
+ 
+**Root cause:** The Proxmox console was accessed through LibreWolf. During Ubuntu installation, the **Shift key was not registering correctly** in the LibreWolf console session. Any uppercase characters typed during password setup were silently dropped — the password was recorded without capitals, but the password manager entry retained the intended (capitalized) version. The stored password and the actual set password did not match.
+ 
+**Fix:** No credential reset was required. The password manager entry was reviewed and corrected to remove all capital letters, matching what was actually set during installation. Login succeeded after updating the entry.
+ 
+> ⚠️ When accessing the Proxmox console through a browser (particularly LibreWolf or Firefox-based), modifier keys such as Shift, Ctrl, and Alt may not register reliably. Use SPICE client or verify keyboard input carefully when setting passwords during OS installation. Consider using an all-lowercase alphanumeric password during initial setup and changing it once SSH access is confirmed.
+ 
+#### Verification
+ 
+- Static IP confirmed: `10.10.10.10/24`
+- `ping 10.10.10.1` — ✅ Pass
+- `systemctl is-active dns.service` — ✅ active
+ 
+> **Note:** DNS zone configuration, `lab.local` records, and forwarder rules are configured in a later phase.
