@@ -35,13 +35,15 @@ All VMs run on Proxmox VE across a three-node dedicated bare-metal cluster, prov
 | Device | Specs | Role |
 | --- | --- | --- |
 | **Primary Server (pve-srv1)** | 2× Xeon E5-2620 v3 @ 2.40GHz (24 cores), 128GB DDR3 ECC, 2TB NVMe cluster, 4×2TB HDD + 4TB HDD, GTX 1050Ti | Primary Proxmox node — SIEM, monitoring, OPNsense, core services |
-| **HP EliteDesk NUC #1 (pve-nuc1)** | i5-6500T, 16GB RAM, 500GB NVMe | Internal tier VMs — AD DC, Windows 10, Ubuntu Server |
-| **HP EliteDesk NUC #2 (pve-nuc2)** | i5-6500T, 16GB RAM, 128GB NVMe | Attack/DMZ VMs — Kali Linux, REMnux |
+| **HP EliteDesk NUC #1 (pve-nuc1)** | i5-6500T, 16GB RAM, 128GB NVMe | Attack/DMZ VMs — Kali Linux, REMnux |
+| **HP EliteDesk NUC #2 (pve-nuc2)** | i5-6500T, 16GB RAM, 500GB NVMe | Internal tier VMs — AD DC, Windows 10, Ubuntu Server |
 | **MikroTik RB4011iGS+** | 10-port router, SFP+ | Edge router — WAN, VLAN 99 DHCP owner, inter-zone firewall |
 | **MikroTik cAP ax** | WiFi 6 AP | Wireless access for Personal (VLAN 40) and Untrusted (VLAN 99) |
 | **TP-Link TL-SG1016DE** | 16-port managed switch | 802.1Q VLAN switching, port mirroring → Security Onion |
 | **Raspberry Pi 3B** | 1GB RAM | Pi-hole DNS for Untrusted VLAN 99 (physical device) |
 | **Windows 11 PC** | 12th gen i5, 64GB RAM, 15TB+ storage, RTX 3060Ti | Ad-hoc tasks via VMware |
+
+> **Note:** pve-nuc1 has 128GB NVMe. The Windows Server, Windows 10, and Ubuntu Server VMs (which together require ~170GB+ of disk) are hosted on pve-nuc2 (500GB NVMe) for this reason. pve-nuc1 hosts the lighter Kali and REMnux VMs whose combined footprint fits within 128GB.
 
 **Proxmox VE:** v8.4 · Kernel 6.8.12-pve · Boot Mode: EFI
 
@@ -136,9 +138,9 @@ All VMs managed in Proxmox VE with snapshots before each exercise for clean roll
 | 102 | wazuh | Wazuh OVA 4.x | 8GB | 10 | 🔲 Planned | Wazuh SIEM/XDR — endpoint detection, alerting |
 | 103 | sec-onion | Security Onion 2 | 8GB | 10 | 🔲 Planned | Zeek, Suricata, passive PCAP, IDS/IPS |
 | 104 | technitium-dns | Ubuntu 22.04 | 1GB | 10 | 🔲 Planned | Internal recursive/authoritative DNS (lab.local) |
-| 105 | nextcloud | Ubuntu 22.04 | 2GB | 50 | 🔲 Planned | Personal cloud storage |
+| 107 | nextcloud | Ubuntu 22.04 | 2GB | 50 | 🔲 Planned | Personal cloud storage |
 
-### pve-nuc1 — Internal Tier
+### pve-nuc2 — Internal Tier
 
 | VMID | Name | OS | RAM | VLAN | Status | Role |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -146,7 +148,7 @@ All VMs managed in Proxmox VE with snapshots before each exercise for clean roll
 | 202 | corp-win10 | Windows 10 Pro | 4GB | 20 | 🔲 Planned | Victim workstation — Sysmon, Wazuh agent |
 | 203 | corp-ubuntu | Ubuntu 22.04 | 2GB | 20 | 🔲 Planned | Linux victim — Apache, SSH, Wazuh agent |
 
-### pve-nuc2 — Attack / DMZ Tier
+### pve-nuc1 — Attack / DMZ Tier
 
 | VMID | Name | OS | RAM | VLAN | Status | Role |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -311,8 +313,6 @@ dns && dns.qry.name.len > 50
 | Missing Windows patches | Varies | Intentionally unpatched |
 | RDP — NLA not enforced | 7.5 | Credential relay target |
 | Weak Kerberos config | 8.1 | Kerberoastable service accounts configured |
-
-**Key insight:** The same CVE-2017-0144 (EternalBlue, CVSS 9.8) on an internet-facing server vs. an isolated Internal VLAN with no DMZ access has completely different real-world risk. Context matters as much as the score.
 
 ---
 
