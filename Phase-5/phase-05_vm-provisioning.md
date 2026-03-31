@@ -24,8 +24,8 @@
 | Node     | VMs Provisioned in This Phase                                                                                            |
 | -------- | ------------------------------------------------------------------------------------------------------------------------ |
 | pve-srv1 | VM 100 (OPNsense), VM 101 (Splunk), VM 102 (Wazuh), VM 103 (Security Onion), VM 104 (Technitium DNS), VM 107 (Nextcloud) |
-| pve-nuc1 | VM 201 (corp-dc), VM 202 (corp-win10), VM 203 (corp-ubuntu)                                                              |
-| pve-nuc2 | VM 301 (kali), VM 302 (REMnux)                                                                                           |
+| pve-nuc1 | VM 301 (kali), VM 302 (REMnux)                                                                                           |
+| pve-nuc2 | VM 201 (corp-dc), VM 202 (corp-win10), VM 203 (corp-ubuntu)                                                              |
 
 ---
 
@@ -138,8 +138,7 @@
 
 ---
 
-### pve-nuc1 — Internal Tier
-
+### pve-nuc2 — Internal Tier
 ---
 
 #### VM 201 — corp-dc (Windows Server 2022)
@@ -190,7 +189,8 @@
 
 ---
 
-### pve-nuc2 — Attack / DMZ Tier
+### pve-nuc1 — Attack / DMZ Tier
+
 
 ---
 
