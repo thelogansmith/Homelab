@@ -1,0 +1,16 @@
+# Phase 3 — Proxmox on NUCs (Cluster)
+**GitHub Dir:** `phase-3-proxmox-nucs-cluster`  
+
+## Tasks
+
+- [x] **Install Proxmox on NUC #1**
+  - Skills: Repeated Proxmox install, cluster node preparation, static IP planning...
+
+- [x] **Install Proxmox on NUC #2**
+  - Skills: Proxmox multi-node setup, consistency in node configuration...
+
+- [x] **Create Proxmox cluster
+  - Skills: Proxmox clustering (pvecm), quorum concepts, HA design principles...
+
+## Notes
+Completed, had issues when forming the cluster
