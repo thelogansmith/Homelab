@@ -1,0 +1,452 @@
+# Phase 2 — Network Infrastructure Configuration
+**Homelab Project | github.com/thelogansmith/Homelab**
+
+**Objective:** Configure the MikroTik RB4011iGS+ edge router and TP-Link TL-SG1016DE managed switch to establish VLAN segmentation, WAN connectivity, NAT, and traffic distribution to all Proxmox nodes.
+
+**Definition of done:**
+- MikroTik WAN interface receiving ISP DHCP lease
+- OPNsense WAN receiving DHCP lease from MikroTik (`10.0.10.2`)
+- VLAN 99 devices receiving DHCP from MikroTik (`192.168.99.x`)
+- TP-Link switch trunking VLANs 10/20/40/50/99 to all Proxmox nodes
+- VMs on pve-nuc1 and pve-nuc2 receiving DHCP leases from OPNsense on correct VLANs
+
+---
+
+## Architecture Overview
+
+The lab uses an intentional double-NAT design. The MikroTik sits at the network edge, handles WAN connectivity, and provides the outer NAT layer. OPNsense (VM 100 on pve-srv1) acts as the inner firewall and gateway for all trusted VLANs. VLAN 99 (Untrusted/IoT) is the exception — it is fully MikroTik-owned and never touches OPNsense.
+
+### VLAN Summary
+
+| VLAN | Name | Subnet | Gateway | Managed By |
+|------|------|--------|---------|------------|
+| 10 | Management | `10.10.10.0/24` | `10.10.10.1` | OPNsense |
+| 20 | Internal | `192.168.20.0/24` | `192.168.20.1` | OPNsense |
+| 40 | Personal | `10.40.40.0/24` | `10.40.40.1` | OPNsense |
+| 50 | DMZ | `172.16.50.0/24` | `172.16.50.1` | OPNsense |
+| 99 | Untrusted/IoT | `192.168.99.0/24` | `192.168.99.1` | MikroTik |
+
+### MikroTik RB4011 — Physical Port Assignment
+
+| Port | Connected Device | Role |
+|------|-----------------|------|
+| ether1 | ISP Modem/ONT | WAN — DHCP client upstream |
+| ether2 | MikroTik cAP ax WAP | Trunk — VLAN 40 + VLAN 99 tagged |
+| ether3 | Gaming PC | Trunk — VLAN 10 + VLAN 40 tagged (Windows config deferred — see Step 6) |
+| ether4 | pve-srv1 (vmbr0) | OPNsense WAN transit — `10.0.10.0/24` |
+| ether9 | TP-Link switch | Primary trunk — VLANs 10/20/40/50/99 |
+| ether10 | TP-Link switch | Redundant trunk — VLANs 10/20/40/50/99 (future LACP) |
+
+---
+
+## Part 1 — MikroTik RB4011 Configuration
+
+All commands are entered via the RouterOS 6 CLI, accessible through the serial console (115200 baud, 8N1, flow control: None) or Winbox terminal. Run commands in the order presented.
+
+### Step 1 — Housekeeping
+
+Setting the hostname identifies this device in logs and Winbox. Disabling unused services (Telnet, FTP, API) reduces the attack surface — these are enabled by default in ROS6 and present unnecessary exposure even on an internal network. NTP synchronization is critical for log correlation: when cross-referencing MikroTik firewall logs in Splunk against OPNsense and Wazuh events, timestamps must be consistent across all devices.
+
+```routeros
+/system identity set name=mikrotik
+/system clock set time-zone-name=America/Los_Angeles
+/password
+/ip service disable telnet,ftp,api,api-ssl,www
+/system ntp client set enabled=yes primary-ntp=216.239.35.0 secondary-ntp=216.239.35.4
+```
+
+---
+
+### Step 2 — Remove ROS6 Defaults
+
+RouterOS 6 NetInstall creates a default configuration that includes a bridge, a DHCP server on ether2, and an IP address of `192.168.88.1`. These defaults conflict with the intended design and must be cleared before building the correct configuration. Leaving them in place would cause address conflicts and unexpected routing behavior.
+
+```routeros
+/ip address remove [find]
+/ip dhcp-server remove [find]
+/ip pool remove [find]
+/interface bridge remove [find]
+```
+
+---
+
+### Step 3 — WAN Interface (ether1)
+
+ether1 connects to the ISP modem or ONT and receives a public IP address via DHCP. This is the only interface that faces the internet directly. All other interfaces sit behind NAT.
+
+```routeros
+/ip dhcp-client add interface=ether1 disabled=no
+```
+
+---
+
+### Step 4 — OPNsense WAN Transit (ether4)
+
+ether4 connects directly to the physical NIC on pve-srv1 mapped to `vmbr0` — the Proxmox bridge that OPNsense uses for its WAN interface (`vtnet0`). OPNsense needs to receive a DHCP lease from MikroTik on this link so it can treat MikroTik as its upstream gateway.
+
+A dedicated transit subnet (`10.0.10.0/24`) is used rather than placing OPNsense on any of the VLAN subnets. This keeps the WAN handoff logically separate from the internal VLAN space and avoids routing ambiguity. OPNsense will receive `10.0.10.2` as its WAN IP, and all traffic it sends upstream will be routed by MikroTik toward ether1.
+
+```routeros
+/ip address add address=10.0.10.1/24 interface=ether4
+/ip pool add name=opnsense-wan-pool ranges=10.0.10.2-10.0.10.10
+/ip dhcp-server add name=opnsense-wan interface=ether4 address-pool=opnsense-wan-pool disabled=no
+/ip dhcp-server network add address=10.0.10.0/24 gateway=10.0.10.1 dns-server=10.0.10.1
+```
+
+> **Note:** After applying this configuration, reboot OPNsense or release/renew its WAN DHCP lease. It should pull `10.0.10.2` and show `10.0.10.1` as its upstream gateway.
+
+---
+
+### Step 5 — WAP Trunk (ether2 — VLAN 40 + VLAN 99)
+
+ether2 connects to the MikroTik cAP ax wireless access point. The WAP serves two SSIDs: one mapped to VLAN 40 (Personal — trusted wireless clients) and one mapped to VLAN 99 (Untrusted — IoT and guest devices). Because the WAP handles multiple VLANs, it requires a tagged trunk rather than a simple access port.
+
+Creating VLAN sub-interfaces on ether2 tells the MikroTik to tag outbound frames for each VLAN and accept inbound tagged frames from the WAP. The WAP must be configured to match these VLAN IDs on its SSID-to-VLAN mappings.
+
+```routeros
+/interface vlan add name=vlan40-wap vlan-id=40 interface=ether2
+/interface vlan add name=vlan99-wap vlan-id=99 interface=ether2
+```
+
+---
+
+### Step 6 — Gaming PC Trunk (ether3 — VLAN 10 + VLAN 40)
+
+ether3 connects to the gaming/desktop PC. The intent is for this machine to have access to both VLAN 40 (Personal — internet and personal services) and VLAN 10 (Management — Proxmox web UI, OPNsense, and lab management tools). The MikroTik side is configured as a tagged trunk for both VLANs.
+
+> **⚠ Warning:** The gaming PC has a Realtek NIC, which has unreliable VLAN tagging support in Windows. The Windows-side configuration is deferred. Options when ready: add an Intel NIC (one per VLAN, most reliable), attempt Realtek VLAN tagging, or use an OPNsense firewall rule to allow VLAN 40 hosts to reach VLAN 10 management addresses without a second VLAN interface on the PC.
+
+```routeros
+/interface bridge add name=br-ether3 vlan-filtering=yes
+/interface bridge port add bridge=br-ether3 interface=ether3
+/interface bridge vlan add bridge=br-ether3 vlan-ids=10 tagged=ether3
+/interface bridge vlan add bridge=br-ether3 vlan-ids=40 tagged=ether3
+```
+
+---
+
+### Step 7 — Switch Trunk (ether9 + ether10 — VLANs 10/20/40/50/99)
+
+ether9 and ether10 both connect to the TP-Link TL-SG1016DE managed switch. The switch distributes VLAN traffic to pve-nuc1 and pve-nuc2. All five VLANs must be carried on this trunk so that VMs on the NUCs can reach their respective OPNsense VLAN interfaces for DHCP and gateway connectivity.
+
+VLAN 99 is included here because wired IoT devices may be connected to the switch. ether10 mirrors ether9's VLAN assignments as a redundant uplink — if one link fails, the other continues to carry traffic. LACP bonding can be added in a later phase to use both links concurrently.
+
+```routeros
+# ether9 — primary trunk
+/interface vlan add name=vlan10-sw  vlan-id=10  interface=ether9
+/interface vlan add name=vlan20-sw  vlan-id=20  interface=ether9
+/interface vlan add name=vlan40-sw  vlan-id=40  interface=ether9
+/interface vlan add name=vlan50-sw  vlan-id=50  interface=ether9
+/interface vlan add name=vlan99-sw  vlan-id=99  interface=ether9
+
+# ether10 — redundant trunk
+/interface vlan add name=vlan10-sw2 vlan-id=10  interface=ether10
+/interface vlan add name=vlan20-sw2 vlan-id=20  interface=ether10
+/interface vlan add name=vlan40-sw2 vlan-id=40  interface=ether10
+/interface vlan add name=vlan50-sw2 vlan-id=50  interface=ether10
+/interface vlan add name=vlan99-sw2 vlan-id=99  interface=ether10
+```
+
+---
+
+### Step 8 — VLAN 99 Gateway and DHCP (MikroTik-owned)
+
+VLAN 99 is the only VLAN the MikroTik manages end-to-end. OPNsense has no NIC connected to VLAN 99, so the MikroTik must serve as both the gateway and DHCP server for this segment. This is intentional — VLAN 99 devices (IoT, untrusted clients) should have no path into OPNsense-managed networks.
+
+VLAN 99 traffic arrives from two physical paths: tagged frames from the WAP (ether2) and tagged frames from the switch (ether9/10, for wired IoT ports). Bridging all VLAN 99 interfaces under `br-vlan99` allows one DHCP server and one IP address to serve the entire VLAN regardless of which physical path a device uses.
+
+```routeros
+/interface bridge add name=br-vlan99
+/interface bridge port add bridge=br-vlan99 interface=vlan99-wap
+/interface bridge port add bridge=br-vlan99 interface=vlan99-sw
+/interface bridge port add bridge=br-vlan99 interface=vlan99-sw2
+
+/ip address add address=192.168.99.1/24 interface=br-vlan99
+/ip pool add name=vlan99-pool ranges=192.168.99.100-192.168.99.200
+/ip dhcp-server add name=vlan99-dhcp interface=br-vlan99 address-pool=vlan99-pool disabled=no
+/ip dhcp-server network add address=192.168.99.0/24 gateway=192.168.99.1 dns-server=192.168.99.1
+```
+
+---
+
+### Step 9 — NAT / Masquerade
+
+NAT allows all internal devices to share the single public IP assigned to ether1. Without this rule, packets from internal subnets would reach the internet with RFC1918 source addresses, which are dropped by upstream routers as non-routable. The masquerade action dynamically substitutes the source IP of outbound packets with the MikroTik's WAN IP and maintains a connection tracking table to route return traffic back to the originating host. This single rule covers all internal traffic — OPNsense downstream and VLAN 99 devices alike.
+
+```routeros
+/ip firewall nat add chain=srcnat out-interface=ether1 action=masquerade comment="Masquerade all internal to WAN"
+```
+
+---
+
+### Step 10 — Firewall Rules
+
+The MikroTik firewall operates at the outer NAT layer. Its responsibilities at this stage are: protecting the MikroTik itself from unsolicited inbound WAN traffic, enforcing VLAN 99 isolation from all internal subnets, and allowing established/related connections to flow without interruption. Granular inter-VLAN policy between VLANs 10/20/40/50 is handled by OPNsense in a later phase.
+
+Rule order matters in RouterOS — rules are evaluated top to bottom and the first match wins. The established/related rule must come first to ensure return traffic for existing connections is never blocked by a subsequent drop rule.
+
+```routeros
+# Allow established/related — must be first
+/ip firewall filter add chain=forward connection-state=established,related action=accept \
+  comment="Allow established/related"
+
+# Drop invalid connection states
+/ip firewall filter add chain=forward connection-state=invalid action=drop \
+  comment="Drop invalid"
+
+# VLAN 99 isolation — block all RFC1918 destinations
+/ip firewall filter add chain=forward in-interface=br-vlan99 dst-address=10.0.0.0/8 action=drop \
+  comment="VLAN99 blocked from 10.x"
+/ip firewall filter add chain=forward in-interface=br-vlan99 dst-address=172.16.0.0/12 action=drop \
+  comment="VLAN99 blocked from 172.16.x"
+/ip firewall filter add chain=forward in-interface=br-vlan99 dst-address=192.168.0.0/16 action=drop \
+  comment="VLAN99 blocked from 192.168.x"
+
+# Allow VLAN 99 to reach the internet
+/ip firewall filter add chain=forward in-interface=br-vlan99 out-interface=ether1 action=accept \
+  comment="VLAN99 internet OK"
+
+# Protect the MikroTik itself from unsolicited WAN connections
+/ip firewall filter add chain=input in-interface=ether1 connection-state=new action=drop \
+  comment="Drop new inbound from WAN"
+```
+
+---
+
+### Step 11 — UPnP for VLAN 99
+
+UPnP allows devices to automatically request port forwarding rules from the router without manual configuration. This is primarily used by gaming consoles and some IoT devices for NAT traversal in peer-to-peer connections.
+
+UPnP is only enabled for VLAN 99 (`br-vlan99`). Devices on OPNsense-managed VLANs sit behind a second NAT layer, so UPnP requests from those devices reach OPNsense rather than MikroTik — the double-NAT design means MikroTik's UPnP cannot assist them. Gaming consoles should be placed on VLAN 99 to benefit from this single-NAT path and working UPnP.
+
+```routeros
+/ip upnp set enabled=yes
+/ip upnp interfaces add interface=ether1 type=external
+/ip upnp interfaces add interface=br-vlan99 type=internal
+```
+
+---
+
+### Step 12 — Syslog Forwarding to Splunk
+
+MikroTik forwards log events to Splunk (VM 101, `10.10.10.101`) over UDP syslog. Configuring this now means MikroTik logs will arrive in Splunk automatically once the Splunk syslog input is configured in Phase 8 — no return visit to the MikroTik required.
+
+Firewall and DHCP topics are the most valuable for SOC work: firewall logs show inter-VLAN traffic decisions and blocked connection attempts, while DHCP logs provide a MAC-to-IP mapping over time for host identification.
+
+```routeros
+/system logging action add name=splunk target=remote remote=10.10.10.101 remote-port=514 bsd-syslog=yes
+/system logging add topics=firewall action=splunk
+/system logging add topics=dhcp action=splunk
+```
+
+---
+
+### Step 13 — Verification
+
+```routeros
+# WAN received ISP address
+/ip dhcp-client print
+
+# All interface IPs assigned correctly
+/ip address print
+
+# NAT rule is present
+/ip firewall nat print
+
+# Firewall rules in correct order
+/ip firewall filter print
+
+# OPNsense WAN lease issued (10.0.10.2 should appear)
+/ip dhcp-server lease print
+```
+
+**Expected state after MikroTik configuration is complete:**
+- `ether1` shows a public IP from ISP DHCP
+- `ether4` shows `10.0.10.1/24`
+- `br-vlan99` shows `192.168.99.1/24`
+- OPNsense WAN lease shows `10.0.10.2` bound to pve-srv1's MAC
+- NAT masquerade rule present on `srcnat` chain
+- Firewall rule #0 is the established/related accept rule
+
+---
+
+## Part 2 — TP-Link TL-SG1016DE Switch Configuration
+
+The TP-Link TL-SG1016DE is a web-managed 16-port gigabit switch. All configuration is done through its web UI — there is no CLI. The switch distributes VLAN traffic from the MikroTik trunk to pve-nuc1, pve-nuc2, and pve-srv1, and mirrors all traffic to Security Onion for passive packet capture.
+
+### Switch Port Assignment
+
+| Port | Connected Device | VLAN Mode | VLANs |
+|------|-----------------|-----------|-------|
+| Port 1 | MikroTik ether9 (primary) | Tagged trunk | 10, 20, 40, 50, 99 |
+| Port 2 | MikroTik ether10 (redundant) | Tagged trunk | 10, 20, 40, 50, 99 |
+| Port 3 | pve-nuc1 | Tagged trunk | 10, 50 |
+| Port 4 | pve-nuc2 | Tagged trunk | 10, 20 |
+| Port 5 | pve-srv1 | Tagged trunk | 10, 20, 40, 50 |
+| Port 6 | Security Onion mirror port | Mirror destination | All (mirror) |
+| Port 7–16 | Future expansion | Unassigned | — |
+
+> **Note:** Port numbers above assume a standard patch panel layout. Adjust to match your actual cabling. The important detail is which VLANs each port carries, not the specific port number.
+
+> **Note:** pve-srv1 connects to both MikroTik ether4 directly (OPNsense WAN transit) and to the switch (VLAN distribution). The switch connection to pve-srv1 carries VLANs 10/20/40/50 so that traffic between VMs on pve-srv1 and VMs on the NUCs can flow correctly.
+
+---
+
+### Step 1 — Access the Switch Web UI and Set Management IP
+
+Connect a PC directly to the switch on any unconfigured port. Navigate to the switch's current IP in a browser. Default credentials on a fresh TL-SG1016DE are `admin` / `admin`.
+
+Before configuring VLANs, assign the switch a static management IP on VLAN 10 so it remains reachable after VLAN configuration is applied. This prevents locking yourself out.
+
+1. Go to **System → System Info → Management VLAN**
+2. Set Management VLAN to `10`
+3. Set IP address to `10.10.10.2/24`, gateway `10.10.10.1`
+4. Save — reconnect at the new IP after saving
+
+---
+
+### Step 2 — Enable 802.1Q VLAN Mode
+
+The TL-SG1016DE supports two VLAN modes: MTU VLAN (simplified port-based) and 802.1Q VLAN (the standard tagged mode). 802.1Q is required here because multiple VLANs must coexist on trunk ports.
+
+1. Go to **VLAN → 802.1Q VLAN**
+2. Enable 802.1Q VLAN
+3. Save
+
+> **⚠ Warning:** Enabling 802.1Q VLAN mode resets any existing port-based VLAN configuration. Do this before configuring individual VLANs.
+
+---
+
+### Step 3 — Create VLANs
+
+The switch must know which VLAN IDs exist before ports can be assigned to them.
+
+1. Go to **VLAN → 802.1Q VLAN → VLAN Config**
+2. Add the following VLANs:
+
+| VLAN ID | Name |
+|---------|------|
+| 10 | Management |
+| 20 | Internal |
+| 40 | Personal |
+| 50 | DMZ |
+| 99 | Untrusted |
+
+---
+
+### Step 4 — Configure MikroTik Uplink Ports (Tagged Trunk)
+
+Ports 1 and 2 connect to MikroTik ether9 and ether10 respectively. They must carry all five VLANs as tagged frames. For each VLAN entry, add both ports as Tagged members.
+
+| VLAN | Port 1 (MikroTik ether9) | Port 2 (MikroTik ether10) |
+|------|--------------------------|---------------------------|
+| 10 | Tagged | Tagged |
+| 20 | Tagged | Tagged |
+| 40 | Tagged | Tagged |
+| 50 | Tagged | Tagged |
+| 99 | Tagged | Tagged |
+
+---
+
+### Step 5 — Configure Proxmox Node Ports
+
+Each Proxmox node receives only the VLANs relevant to its hosted VMs. The Proxmox bridges on each node are already configured — the switch just needs to pass the correct tagged frames through.
+
+**pve-nuc1** — hosts Kali (VM 301, VLAN 50) and REMnux (VM 302, isolated/no NIC)
+- Edit VLAN 10 → set pve-nuc1 port as **Tagged**
+- Edit VLAN 50 → set pve-nuc1 port as **Tagged**
+
+**pve-nuc2** — hosts corp-dc (VM 201), corp-win10 (VM 202), corp-ubuntu (VM 203) — all VLAN 20
+- Edit VLAN 10 → set pve-nuc2 port as **Tagged**
+- Edit VLAN 20 → set pve-nuc2 port as **Tagged**
+
+**pve-srv1** — hosts all Management and DMZ tier VMs (VLANs 10/20/40/50)
+- Edit VLANs 10, 20, 40, 50 → set pve-srv1 port as **Tagged**
+
+---
+
+### Step 6 — Set Port PVID (Native VLAN)
+
+PVID determines how the switch handles untagged frames arriving on a port. All Proxmox nodes send tagged frames, so this is primarily a safety setting to prevent unexpected behavior from any untagged traffic.
+
+Go to **VLAN → 802.1Q VLAN → Port Config** and set PVID:
+
+| Port | Connected Device | PVID |
+|------|-----------------|------|
+| Port 1 | MikroTik ether9 | 1 (default — trunk carries tagged only) |
+| Port 2 | MikroTik ether10 | 1 (default — trunk carries tagged only) |
+| Port 3 | pve-nuc1 | 10 (Management — Proxmox host traffic) |
+| Port 4 | pve-nuc2 | 10 (Management — Proxmox host traffic) |
+| Port 5 | pve-srv1 | 10 (Management — Proxmox host traffic) |
+
+---
+
+### Step 7 — Configure Port Mirroring for Security Onion
+
+Security Onion (VM 103) performs passive traffic analysis using Zeek and Suricata. It needs to see a copy of all traffic crossing the switch — not just traffic destined for its own MAC address. Port mirroring (SPAN — Switched Port Analyzer) duplicates all frames from specified source ports to a dedicated mirror destination port.
+
+The mirror destination port connects to the NIC on pve-srv1 mapped to Security Onion's second (monitoring) interface. This NIC has no IP address — it exists solely to receive mirrored frames. Zeek and Suricata listen on this interface in promiscuous mode.
+
+1. Go to **Monitoring → Port Mirror**
+2. Set Destination Port to the Security Onion mirror port (Port 6)
+3. Set Source Ports to all active ports carrying lab traffic (Ports 1–5 at minimum)
+4. Set Mode to **Ingress + Egress** (capture traffic in both directions)
+5. Enable → Save
+
+> **Note:** The mirror destination port (Port 6) should not be a member of any VLAN. It is a passive receiver only. Adding it to a VLAN would allow it to inject traffic, which is not the intent.
+
+---
+
+### Step 8 — Save Configuration
+
+The TL-SG1016DE does not automatically persist configuration to flash. Always save explicitly after any changes — a power cycle without saving reverts all configuration.
+
+1. Go to **System → System Tools → Config Save**
+2. Click **Save Config**
+
+> **⚠ Warning:** Save immediately after every change. A power cycle without saving will revert all VLAN and port settings.
+
+---
+
+### Step 9 — Verification
+
+After completing switch configuration, boot the VMs on the NUCs and confirm DHCP lease assignment and gateway ping for each.
+
+| VM | Node | VLAN | Expected IP | Ping Target | Status |
+|----|------|------|-------------|-------------|--------|
+| nextcloud (107) | pve-srv1 | 50 | `172.16.50.x` | `172.16.50.1` | 🔲 |
+| corp-dc (201) | pve-nuc2 | 20 | `192.168.20.x` | `192.168.20.1` | 🔲 |
+| corp-win10 (202) | pve-nuc2 | 20 | `192.168.20.x` | `192.168.20.1` | 🔲 |
+| corp-ubuntu (203) | pve-nuc2 | 20 | `192.168.20.x` | `192.168.20.1` | 🔲 |
+| kali (301) | pve-nuc1 | 50 | `172.16.50.x` | `172.16.50.1` | 🔲 |
+
+All rows passing unblocks the remainder of Phase 5 VM provisioning.
+
+---
+
+## Troubleshooting Reference
+
+### VM gets no DHCP lease on VLAN 20/40/50
+
+- Confirm MikroTik ether9/10 VLAN interfaces were created for that VLAN ID: `/interface vlan print`
+- Confirm the switch port to pve-nuc1/nuc2 has that VLAN tagged
+- Confirm the Proxmox bridge (`vmbr20`/`vmbr40`/`vmbr50`) exists on the target node and has no VLAN-aware setting enabled
+- Confirm OPNsense Kea DHCP is running: **Services → Kea DHCPv4** → status green
+- Force a DHCP request from inside the VM: `sudo dhclient ens18`
+
+### OPNsense WAN not getting lease from MikroTik
+
+- Verify ether4 IP: `/ip address print` — should show `10.0.10.1` on `ether4`
+- Verify DHCP server running: `/ip dhcp-server print` — `opnsense-wan` should show `R` (running)
+- Check for active lease: `/ip dhcp-server lease print`
+- On OPNsense shell: `ifconfig vtnet0` — should show `10.0.10.2`
+
+### VLAN 99 device not getting DHCP
+
+- Verify `br-vlan99` has all three member interfaces: `/interface bridge port print where bridge=br-vlan99`
+- Verify `vlan99-wap`, `vlan99-sw`, `vlan99-sw2` all exist: `/interface vlan print`
+- Check DHCP server status: `/ip dhcp-server print` — `vlan99-dhcp` should show `R`
+
+### MikroTik firewall rule order
+
+Run `/ip firewall filter print` to verify rule order. The established/related accept rule must be rule `#0`. If it is not first, established connections may be incorrectly dropped by a subsequent rule.
